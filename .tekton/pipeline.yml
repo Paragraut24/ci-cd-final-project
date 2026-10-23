@@ -1,0 +1,102 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: cd-pipeline
+spec:
+  workspaces:
+    - name: pipeline-workspace
+  params:
+    - name: git-url
+      type: string
+      description: The URL of the Git repository to clone
+      default: "https://github.com/Paragraut24/ci-cd-final-project.git"
+    - name: git-revision
+      type: string
+      description: The Git revision to checkout
+      default: "main"
+    - name: app-name
+      type: string
+      description: The name of the application deployment
+      default: "cd-pipeline"
+    - name: build-image
+      type: string
+      description: The container image to build and push
+      default: "image-registry.openshift-image-registry.svc:5000/$(context.pipelineRun.namespace)/cd-pipeline:latest"
+  tasks:
+    - name: cleanup
+      taskRef:
+        name: cleanup
+      workspaces:
+        - name: source
+          workspace: pipeline-workspace
+
+    - name: git-clone
+      taskRef:
+        name: git-clone
+        kind: ClusterTask
+      runAfter:
+        - cleanup
+      workspaces:
+        - name: output
+          workspace: pipeline-workspace
+      params:
+        - name: url
+          value: "$(params.git-url)"
+        - name: revision
+          value: "$(params.git-revision)"
+        - name: deleteExisting
+          value: "true"
+
+    - name: lint
+      taskRef:
+        name: eslint
+        kind: ClusterTask
+      runAfter:
+        - git-clone
+      workspaces:
+        - name: source
+          workspace: pipeline-workspace
+      params:
+        - name: image
+          value: "node:18-alpine"
+        - name: args
+          value: ["src/", "tests/"]
+
+    - name: tests
+      taskRef:
+        name: jest
+      runAfter:
+        - lint
+      workspaces:
+        - name: source
+          workspace: pipeline-workspace
+
+    - name: buildah
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      runAfter:
+        - tests
+      workspaces:
+        - name: source
+          workspace: pipeline-workspace
+      params:
+        - name: IMAGE
+          value: "$(params.build-image)"
+        - name: TLSVERIFY
+          value: "false"
+
+    - name: deploy
+      taskRef:
+        name: openshift-client
+        kind: ClusterTask
+      runAfter:
+        - buildah
+      workspaces:
+        - name: source
+          workspace: pipeline-workspace
+      params:
+        - name: SCRIPT
+          value: |
+            oc create deployment $(params.app-name) --image=$(params.build-image) --dry-run=client -o yaml | oc apply -f -
+            oc expose deployment/$(params.app-name) --port=8000 --target-port=8000 --dry-run=client -o yaml | oc apply -f -
